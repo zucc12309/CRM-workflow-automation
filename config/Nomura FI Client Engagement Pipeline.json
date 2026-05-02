@@ -1,0 +1,311 @@
+{
+  "name": "Nomura FI Client Engagement Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyX",
+              "value": 5,
+              "unit": "minutes"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "q": "subject:\"CRM Export\" has:attachment is:unread"
+        },
+        "options": {}
+      },
+      "id": "ef1f281c-ae0b-47f1-a84e-1998b66a2b6d",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1296,
+        1632
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "BIBz8i0SXS10Ob1E",
+          "name": "Gmail account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const { spawnSync } = require('child_process');\n\nconst itemIndex = $itemIndex ?? 0;\nconst inputItem = $input.item;\nif (!inputItem) throw new Error('No input item received');\n\nfunction pickAttachment(binary) {\n  const keys = Object.keys(binary || {});\n  const key =\n    keys.find(k => {\n      const b = binary[k] || {};\n      const mime = (b.mimeType || '').toLowerCase();\n      const name = (b.fileName || '').toLowerCase();\n      return mime.includes('spreadsheet') || mime.includes('excel') ||\n        mime.includes('openxmlformats') || name.endsWith('.xlsx');\n    }) || keys.find(k => k.startsWith('attachment_')) || keys[0];\n\n  return { key, keys };\n}\n\nconst binary = inputItem.binary || {};\nconst { key: attachmentKey, keys: allKeys } = pickAttachment(binary);\nif (!attachmentKey) throw new Error('No attachment found. Keys: ' + allKeys.join(', '));\n\nlet buffer;\ntry {\n  buffer = await this.helpers.getBinaryDataBuffer(itemIndex, attachmentKey);\n} catch (helperErr) {\n  const inline = (binary[attachmentKey].data || '').replace(/-/g, '+').replace(/_/g, '/');\n  if (inline && inline.length > 100) {\n    buffer = Buffer.from(inline, 'base64');\n  } else {\n    throw new Error(\n      `Failed to read attachment \"${attachmentKey}\" from binary storage: ${helperErr.message}`\n    );\n  }\n}\n\nconst b64 = buffer.toString('base64');\nif (!b64 || b64.length < 100) {\n  throw new Error(`Attachment data too small (${b64.length} chars)`);\n}\n\nconst result = spawnSync(\n  '/Users/priyanshupatel/Documents/GitHub/personal/venv/bin/python3',\n  ['/Users/priyanshupatel/Documents/GitHub/personal/src/preprocessing.py', '-'],\n  { input: b64, encoding: 'utf8', timeout: 120000 }\n);\n\nif (result.error) throw new Error('Python spawn error: ' + result.error.message);\nif (result.status !== 0) throw new Error('Preprocessing failed:\\n' + result.stderr);\n\nconst stdout = (result.stdout || '').trim();\nlet parsed;\ntry { parsed = JSON.parse(stdout); }\ncatch(e) { throw new Error('Could not parse preprocessing output:\\n' + stdout); }\n\nif (parsed.error) throw new Error('Preprocessing error: ' + parsed.error);\n\nconst triggerJson = $('Gmail Trigger').item.json;\nreturn {\n  json: {\n    ...parsed,\n    senderEmail: triggerJson.from?.value?.[0]?.address || triggerJson.from || '',\n    originalSubject: triggerJson.subject || 'CRM Export',\n  }\n};"
+      },
+      "id": "4dcee198-0e86-4856-bb0f-237f38b67ba0",
+      "name": "Run Preprocessing",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1024,
+        1632
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.error_flag }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "14c78238-796e-4ed9-82b3-1c5416c53513",
+      "name": "Check For Errors",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -784,
+        1632
+      ]
+    },
+    {
+      "parameters": {
+        "toList": "={{ $json.senderEmail }}",
+        "subject": "=RE: {{ $json.originalSubject }} — Processing Error",
+        "message": "=<html><body style=\"font-family:Arial,sans-serif;color:#333;\">\n<div style=\"background:#C00000;padding:20px;color:#fff;\"><h2 style=\"margin:0;\">Nomura CAMS — CRM Processing Error</h2></div>\n<div style=\"padding:20px;\"><p>Your CRM export could not be processed.</p>\n<table style=\"border-collapse:collapse;width:100%;\">\n<tr><td style=\"padding:8px;border:1px solid #ddd;font-weight:bold;\">Error</td><td style=\"padding:8px;border:1px solid #ddd;\">{{ $json.error || 'Data quality issues' }}</td></tr>\n<tr><td style=\"padding:8px;border:1px solid #ddd;font-weight:bold;\">Null Values</td><td style=\"padding:8px;border:1px solid #ddd;\">{{ $json.null_count }}</td></tr>\n<tr><td style=\"padding:8px;border:1px solid #ddd;font-weight:bold;\">Duplicates</td><td style=\"padding:8px;border:1px solid #ddd;\">{{ $json.duplicate_count }}</td></tr>\n</table>\n<p>Please correct the source data and resubmit.</p>\n<p>Regards,<br><strong>Nomura CAMS Pipeline</strong></p>\n</div></body></html>",
+        "options": {
+          "markAsRead": true
+        }
+      },
+      "id": "e38af6d4-39dc-48c9-9880-5d23378ae68f",
+      "name": "Send Error Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [
+        -544,
+        1472
+      ],
+      "webhookId": "6e77378d-2c24-4472-b5bb-c74e39141ac7",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "BIBz8i0SXS10Ob1E",
+          "name": "Gmail account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const { spawnSync } = require('child_process');\n\nconst cleanFilePath = item.json.clean_file_path;\nif (!cleanFilePath) throw new Error('clean_file_path missing from preprocessing output');\n\nconst meta = JSON.stringify({\n  total_rows_clean: item.json.total_rows_clean,\n  processing_date:  item.json.processing_date,\n  timestamp:        item.json.timestamp,\n});\n\nconst result = spawnSync(\n  '/Users/priyanshupatel/Documents/GitHub/personal/venv/bin/python3',\n  ['/Users/priyanshupatel/Documents/GitHub/personal/src/formatting.py', cleanFilePath, meta],\n  { encoding: 'utf8', timeout: 180000 }\n);\n\nif (result.error) throw new Error('Python spawn error: ' + result.error.message);\nif (result.status !== 0) throw new Error('Formatting failed:\\n' + result.stderr);\n\nconst stdout = (result.stdout || '').trim();\nlet parsed;\ntry { parsed = JSON.parse(stdout); }\ncatch(e) { throw new Error('Could not parse formatting output:\\n' + stdout); }\n\nif (!parsed.success) throw new Error('Formatting error: ' + (parsed.error || 'Unknown'));\n\nreturn {\n  json: {\n    ...item.json,\n    formattedFilePath: parsed.formatted_file_path,\n    formattedFileName: parsed.formatted_file_path.split('/').pop(),\n    formattingSuccess: parsed.success,\n  }\n};"
+      },
+      "id": "5a5516db-e4b1-450c-abf6-1a0212c5fcdf",
+      "name": "Run Formatting",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -544,
+        1632
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const p = item.json;\n\nfunction fmt(n) { return Number(n || 0).toLocaleString('en-US'); }\nfunction fmtRpm(n) { return '$' + Number(n || 0).toFixed(0); }\n\nconst top3Text = (p.top_3_clients || [])\n  .map(function(c, i) {\n    return (i+1) + '. ' + (c.client_name || 'Unknown') + ' — Revenue $' + fmt(c.revenue_usd);\n  }).join('\\n');\n\nconst bottom3Text = (p.bottom_3_rpm_clients || [])\n  .map(function(c, i) {\n    return (i+1) + '. ' + (c.client_name || c.Client_Name || 'Unknown') + ' — Rev/Meeting $' + fmtRpm(c.rev_per_meeting || c.Rev_Per_Meeting);\n  }).join('\\n');\n\nconst flaggedText = (p.flagged_clients_list || []).slice(0, 8)\n  .map(function(c) {\n    return '- ' + (c.client_name || 'Unknown') + ': ' + (c.meetings_cnt||0) + ' meetings, Revenue $' + fmt(c.revenue_usd);\n  }).join('\\n') || 'None';\n\nconst mifidText = (p.expired_mifid_list || []).slice(0, 8)\n  .map(function(c) {\n    return '- ' + (c.client_name || c.Client_Name || 'Unknown') + ' (Expiry: ' + (c.mifid_expiry||c.MiFID_Expiry_Date||'Unknown') + ')';\n  }).join('\\n') || 'None';\n\nconst regionEntries = Object.entries(p.region_summary || {})\n  .filter(function(e) { return e[0] !== 'UNKNOWN'; });\nconst regionText = regionEntries.length > 0\n  ? regionEntries.map(function(e) {\n      const r = e[0], v = e[1];\n      if (typeof v === 'object' && v !== null) {\n        return '- ' + r + ': ' + (v.client_count||0) + ' clients, Revenue $' + fmt(v.total_revenue) + ', Avg Meetings ' + (v.avg_meetings||0);\n      }\n      return '- ' + r + ': Revenue $' + fmt(v);\n    }).join('\\n')\n  : '(No regional data — REGION field is blank in source CRM file.)';\n\nconst tierText = Object.entries(p.tier_summary || {})\n  .map(function(e) {\n    const t = e[0], v = e[1];\n    return '- ' + t + ': ' + (v.client_count||0) + ' clients, Revenue $' + fmt(v.total_revenue);\n  }).join('\\n');\n\nconst prompt = [\n  'You are a senior Fixed Income analyst at Nomura Securities.',\n  'Produce an executive briefing note for the Head of Fixed Income Client Management.',\n  '',\n  '=== CRITICAL OUTPUT RULES ===',\n  '1. Return ONLY raw HTML — zero markdown, zero code fences, zero ```html wrappers.',\n  '2. Do NOT wrap output in <html>, <head>, or <body> tags.',\n  '3. Start your response DIRECTLY with the first HTML element (e.g., <h3 ...>).',\n  '4. Use ONLY inline CSS styles. No <style> blocks. No class attributes.',\n  '5. Use Nomura brand colors: dark navy #1F3864, medium blue #2E75B6, light blue #EBF3FB.',\n  '6. CRITICAL: For sections 3 and 4 use ONLY <ul>/<li> lists — NO <table> tags in those sections.',\n  '7. You MAY use <table> ONLY in section 5 for the regional/tier breakdown.',\n  '',\n  '=== HTML STYLE GUIDE ===',\n  'Section header: <h3 style=\"color:#1F3864;font-size:14px;font-weight:bold;border-bottom:2px solid #2E75B6;padding-bottom:4px;margin:20px 0 10px;\">TITLE</h3>',\n  'Paragraph: <p style=\"font-size:13px;line-height:1.7;margin:6px 0;color:#333;\">text</p>',\n  'Bullet list: <ul style=\"font-size:13px;line-height:1.8;padding-left:20px;margin:6px 0;\"><li style=\"margin:4px 0;\">item</li></ul>',\n  'Blue highlight (positive): <strong style=\"color:#2E75B6;\">value</strong>',\n  'Red highlight (warning): <strong style=\"color:#C00000;\">value</strong>',\n  'Section 5 table ONLY: <table style=\"border-collapse:collapse;width:100%;margin:10px 0;\">',\n  'Table header row: <tr style=\"background:#2E75B6;color:#fff;\">',\n  'Table header cell: <th style=\"padding:7px 12px;text-align:left;font-size:12px;\">col</th>',\n  'Table data cell (odd rows): <td style=\"padding:7px 12px;border:1px solid #dde3ed;font-size:12px;background:#fff;\">val</td>',\n  'Table data cell (even rows): <td style=\"padding:7px 12px;border:1px solid #dde3ed;font-size:12px;background:#EBF3FB;\">val</td>',\n  '',\n  '=== CRM DATA ===',\n  'Report Date: ' + p.processing_date,\n  'Total Active Clients: ' + p.total_rows_clean,\n  'Records Removed: ' + p.rows_removed,\n  'Null Fields: ' + (p.null_count || 0),\n  'MiFID Expired: ' + p.expired_mifid_count,\n  'MiFID Status Unknown: ' + (p.unknown_mifid_count || 0),\n  'Clients Flagged for Review: ' + p.flagged_clients_count,\n  'Research Access Pending: ' + (p.research_access_pending_count || 0),\n  '',\n  'Top Analyst: ' + p.top_analyst_name + ' (Revenue: $' + fmt(p.top_analyst_revenue) + ')',\n  'Lowest Efficiency Analyst: ' + p.worst_analyst_name + ' (Rev/Meeting: ' + fmtRpm(p.worst_analyst_rpm) + ')',\n  '',\n  'Top 3 Revenue Clients:',\n  top3Text,\n  '',\n  'Bottom 3 by Revenue/Meeting Efficiency:',\n  bottom3Text,\n  '',\n  'Regional Breakdown:',\n  regionText,\n  '',\n  'Tier Breakdown:',\n  tierText,\n  '',\n  'Clients Flagged (High Meetings, Low Revenue):',\n  flaggedText,\n  '',\n  'MiFID Expired Clients:',\n  mifidText,\n  '',\n  '=== REQUIRED SECTIONS (ALL SIX, in order) ===',\n  '',\n  '1. EXECUTIVE SUMMARY',\n  '   2-3 paragraphs. Reference total_rows_clean, rows_removed, expired_mifid_count, flagged_clients_count.',\n  '',\n  '2. ANALYST PERFORMANCE',\n  '   Name top and worst analyst. Quantify the efficiency gap. Use <ul>/<li> for each analyst.',\n  '',\n  '3. CLIENT RISK FLAGS',\n  '   Use ONLY <ul>/<li> — NO tables. List each flagged client with meetings, revenue, and why it is a concern.',\n  '',\n  '4. MiFID COMPLIANCE ACTIONS',\n  '   Use ONLY <ul>/<li> — NO tables. List each expired client by name and expiry. List unknown-status clients separately.',\n  '   State regulatory consequence and give 3 numbered remediation steps.',\n  '',\n  '5. REGIONAL AND TIER INSIGHTS',\n  '   If Regional Breakdown above says No regional data, write ONE <p> stating data is unavailable — do NOT invent any numbers.',\n  '   Otherwise use ONE <table> for the regional breakdown (columns: Region, Clients, Revenue, Avg Meetings).',\n  '   Use a second <table> for tier breakdown (Tier, Clients, Revenue).',\n  '   Identify strongest and weakest regions and tier concentration risk.',\n  '',\n  '6. RECOMMENDED ACTIONS',\n  '   Exactly 6 <li> bullet points in a <ul>, prioritised by urgency.',\n  '   Each must reference a specific client name, analyst name, or exact number.',\n  '',\n  'Tone: executive, data-led, direct. Minimum 650 words. Every claim must cite a specific figure.'\n].join('\\n');\n\nconst payload = {\n  generationConfig: { temperature: 0.2, maxOutputTokens: 8192 },\n  contents: [{ role: 'user', parts: [{ text: prompt }] }]\n};\n\nreturn { json: { ...item.json, geminiBody: JSON.stringify(payload), aiPrompt: prompt } };"
+      },
+      "id": "b7c3d4e5-f6a7-4890-bcde-f12345678901",
+      "name": "Build AI Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -424,
+        1632
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=YOUR_GEMINI_API_KEY",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.geminiBody }}",
+        "options": {}
+      },
+      "id": "044236ab-efd2-40fe-b57a-ac53b93d4bc8",
+      "name": "Generate AI Briefing",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -184,
+        1632
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const preproc = $('Run Preprocessing').item.json;\nconst formatting = $('Run Formatting').item.json;\n\nfunction tryParseJson(value) {\n  if (typeof value !== 'string') return value;\n  const trimmed = value.trim();\n  if (!trimmed) return value;\n  if (!(trimmed.startsWith('{') || trimmed.startsWith('['))) return value;\n  try { return JSON.parse(trimmed); } catch (e) { return value; }\n}\n\nfunction unwrapPayload(payload) {\n  let current = payload;\n  for (let i = 0; i < 5; i++) {\n    if (typeof current === 'string') {\n      const parsed = tryParseJson(current);\n      if (parsed === current) break;\n      current = parsed;\n      continue;\n    }\n    if (!current || typeof current !== 'object') break;\n    if (typeof current.body === 'string') {\n      const pb = tryParseJson(current.body);\n      if (pb !== current.body) { current = pb; continue; }\n    }\n    if (typeof current.data === 'string') {\n      const pd = tryParseJson(current.data);\n      if (pd !== current.data) { current = pd; continue; }\n    }\n    if (current.body && typeof current.body === 'object' && current.body !== current) { current = current.body; continue; }\n    if (current.data && typeof current.data === 'object' && current.data !== current) { current = current.data; continue; }\n    break;\n  }\n  return current;\n}\n\nfunction extractGeminiText(payload) {\n  const source = unwrapPayload(payload);\n  const candidates = [];\n  if (source && typeof source === 'object') {\n    candidates.push(source);\n    if (Array.isArray(source.candidates) && source.candidates.length) {\n      candidates.push(source.candidates[0]);\n    }\n  }\n  for (const candidate of candidates) {\n    const parts = candidate?.content?.parts || candidate?.parts || [];\n    const text = Array.isArray(parts) ? parts.map(p => p?.text || '').join('').trim() : '';\n    if (text) return text;\n    if (typeof candidate?.text === 'string' && candidate.text.trim()) return candidate.text.trim();\n    if (typeof candidate?.content === 'string' && candidate.content.trim()) return candidate.content.trim();\n  }\n  if (typeof source === 'string' && source.trim()) return source.trim();\n  return '';\n}\n\n// Close any unclosed HTML table structure tags to prevent layout breakage in email\nfunction sanitizeTableHTML(html) {\n  const openTd    = (html.match(/<td[^>]*>/gi)  || []).length;\n  const closeTd   = (html.match(/<\\/td>/gi)     || []).length;\n  const openTh    = (html.match(/<th[^>]*>/gi)  || []).length;\n  const closeTh   = (html.match(/<\\/th>/gi)     || []).length;\n  const openTr    = (html.match(/<tr[^>]*>/gi)  || []).length;\n  const closeTr   = (html.match(/<\\/tr>/gi)     || []).length;\n  const openTable = (html.match(/<table[^>]*>/gi) || []).length;\n  const closeTable= (html.match(/<\\/table>/gi)  || []).length;\n  let suffix = '';\n  for (let i = 0; i < openTd    - closeTd;    i++) suffix += '</td>';\n  for (let i = 0; i < openTh    - closeTh;    i++) suffix += '</th>';\n  for (let i = 0; i < openTr    - closeTr;    i++) suffix += '</tr>';\n  for (let i = 0; i < openTable - closeTable; i++) suffix += '</table>';\n  return html + suffix;\n}\n\n// Extract raw text from Gemini response\nlet rawText = extractGeminiText($json).trim();\n\n// Strip any code fences Gemini might add despite instructions\nrawText = rawText\n  .replace(/^```html\\s*/i, '')\n  .replace(/^```\\s*/i, '')\n  .replace(/```\\s*$/i, '')\n  .trim();\n\n// Fix small-model markdown output (Gemma etc.) before HTML detection\n// 1. ![Section Name](url) or ![Section Name]() → <h3> header\nrawText = rawText.replace(/!\\[([^\\]]+)\\]\\([^)]*\\)/g, function(_, label) {\n  return '<h3 style=\"color:#1F3864;font-size:14px;font-weight:bold;border-bottom:2px solid #2E75B6;padding-bottom:4px;margin:20px 0 10px;\">' + label + '</h3>';\n});\n// 2. Remaining bare ![text] with no parens\nrawText = rawText.replace(/!\\[([^\\]]+)\\]/g, function(_, label) {\n  return '<h3 style=\"color:#1F3864;font-size:14px;font-weight:bold;border-bottom:2px solid #2E75B6;padding-bottom:4px;margin:20px 0 10px;\">' + label + '</h3>';\n});\n// 3. Markdown headers ## or # → <h3>\nrawText = rawText.replace(/^#{1,3}\\s+(.+)$/gm, function(_, title) {\n  return '<h3 style=\"color:#1F3864;font-size:14px;font-weight:bold;border-bottom:2px solid #2E75B6;padding-bottom:4px;margin:20px 0 10px;\">' + title + '</h3>';\n});\n// 4. **bold** → <strong>\nrawText = rawText.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong style=\"color:#1F3864;\">$1</strong>');\n// 5. Markdown bullets * item or - item (outside HTML context)\nrawText = rawText.replace(/^[*-]\\s+(.+)$/gm, '<li style=\"margin:4px 0;font-size:13px;line-height:1.7;\">$1</li>');\n\n// If Gemini returned plain text (no HTML tags), convert to basic HTML\nconst hasHtmlTags = /<[a-z][\\s\\S]*>/i.test(rawText);\nlet aiBriefing;\nif (!rawText) {\n  aiBriefing = '<p style=\"color:#C00000;font-size:13px;\">AI briefing unavailable.</p>';\n} else if (!hasHtmlTags) {\n  const lines = rawText.split('\\n');\n  const htmlLines = lines.map(function(line) {\n    const trimmed = line.trim();\n    if (!trimmed) return '';\n    if (/^\\d+\\.\\s+[A-Z\\s]{4,}/.test(trimmed)) {\n      return '<h3 style=\"color:#1F3864;font-size:14px;font-weight:bold;border-bottom:2px solid #2E75B6;padding-bottom:4px;margin:20px 0 10px;\">' + trimmed + '</h3>';\n    }\n    if (/^[-*•]\\s+/.test(trimmed)) {\n      return '<li style=\"margin:3px 0;font-size:13px;line-height:1.7;\">' + trimmed.replace(/^[-*•]\\s+/, '') + '</li>';\n    }\n    return '<p style=\"font-size:13px;line-height:1.7;margin:6px 0;color:#333;\">' + trimmed + '</p>';\n  });\n  let html = htmlLines.join('\\n');\n  html = html.replace(/(<li[^>]*>.*?<\\/li>\\n?)+/gs, function(m) {\n    return '<ul style=\"font-size:13px;line-height:1.8;padding-left:20px;margin:8px 0;\">' + m + '</ul>';\n  });\n  aiBriefing = html;\n} else {\n  // Sanitize table structure to fix any unclosed tags that would break the email layout\n  aiBriefing = sanitizeTableHTML(rawText);\n}\n\nreturn {\n  json: {\n    senderEmail: preproc.senderEmail,\n    originalSubject: preproc.originalSubject,\n    processing_date: preproc.processing_date,\n    total_rows_clean: preproc.total_rows_clean,\n    rows_removed: preproc.rows_removed,\n    expired_mifid_count: preproc.expired_mifid_count,\n    flagged_clients_count: preproc.flagged_clients_count,\n    top_analyst_name: preproc.top_analyst_name,\n    null_count: preproc.null_count,\n    duplicate_count: preproc.duplicate_count,\n    aiBriefing,\n    formattedFilePath: formatting.formattedFilePath,\n    formattedFileName: formatting.formattedFileName,\n  },\n};"
+      },
+      "id": "97549e58-b336-4485-bb5d-c49c2bb40401",
+      "name": "Extract AI Text",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -64,
+        1632
+      ]
+    },
+    {
+      "parameters": {
+        "filePath": "={{ $json.formattedFilePath }}"
+      },
+      "id": "c255d935-bc9b-4b5c-aea6-f7d4f3c714f9",
+      "name": "Read Formatted File",
+      "type": "n8n-nodes-base.readBinaryFile",
+      "typeVersion": 1,
+      "position": [
+        176,
+        1632
+      ]
+    },
+    {
+      "parameters": {
+        "toList": "={{ $('Extract AI Text').item.json.senderEmail }}",
+        "subject": "=RE: {{ $('Extract AI Text').item.json.originalSubject }} — Clean Report Ready",
+        "message": "=<html>\n<body style=\"font-family:Arial,sans-serif;color:#333;margin:0;padding:0;background:#f0f2f5;\">\n\n  <!-- Header -->\n  <div style=\"background:#1F3864;padding:24px 32px;color:#fff;\">\n    <table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\"><tr>\n      <td>\n        <h1 style=\"margin:0;font-size:22px;letter-spacing:2px;font-weight:900;\">NOMURA</h1>\n        <p style=\"margin:4px 0 0;font-size:12px;color:#a8c6e8;letter-spacing:1px;\">FIXED INCOME CLIENT ENGAGEMENT REPORT</p>\n      </td>\n      <td style=\"text-align:right;\">\n        <p style=\"margin:0;font-size:12px;color:#a8c6e8;\">{{ $('Extract AI Text').item.json.processing_date }}</p>\n        <p style=\"margin:4px 0 0;font-size:10px;color:#6a9cc9;letter-spacing:1px;\">AUTOMATED PIPELINE — CONFIDENTIAL</p>\n      </td>\n    </tr></table>\n  </div>\n\n  <!-- KPI strip -->\n  <div style=\"background:#2E75B6;padding:12px 32px;\">\n    <table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\"><tr>\n      <td style=\"color:#fff;text-align:center;padding:0 16px;border-right:1px solid #5596c8;\">\n        <div style=\"font-size:22px;font-weight:bold;\">{{ $('Extract AI Text').item.json.total_rows_clean }}</div>\n        <div style=\"font-size:10px;color:#a8c6e8;margin-top:2px;\">ACTIVE CLIENTS</div>\n      </td>\n      <td style=\"color:#fff;text-align:center;padding:0 16px;border-right:1px solid #5596c8;\">\n        <div style=\"font-size:22px;font-weight:bold;color:#ffcc00;\">{{ $('Extract AI Text').item.json.expired_mifid_count }}</div>\n        <div style=\"font-size:10px;color:#a8c6e8;margin-top:2px;\">MiFID EXPIRED</div>\n      </td>\n      <td style=\"color:#fff;text-align:center;padding:0 16px;border-right:1px solid #5596c8;\">\n        <div style=\"font-size:22px;font-weight:bold;color:#ff8080;\">{{ $('Extract AI Text').item.json.flagged_clients_count }}</div>\n        <div style=\"font-size:10px;color:#a8c6e8;margin-top:2px;\">FLAGGED CLIENTS</div>\n      </td>\n      <td style=\"color:#fff;text-align:center;padding:0 16px;\">\n        <div style=\"font-size:22px;font-weight:bold;\">{{ $('Extract AI Text').item.json.rows_removed }}</div>\n        <div style=\"font-size:10px;color:#a8c6e8;margin-top:2px;\">RECORDS REMOVED</div>\n      </td>\n    </tr></table>\n  </div>\n\n  <div style=\"max-width:920px;margin:0 auto;padding:24px 32px 32px;\">\n\n    <!-- AI Briefing -->\n    <h2 style=\"color:#1F3864;font-size:15px;border-bottom:2px solid #2E75B6;padding-bottom:6px;margin-top:0;\">AI Analyst Briefing</h2>\n    <div style=\"background:#fff;border-radius:4px;border:1px solid #dde3ed;padding:20px 24px;margin-bottom:24px;box-shadow:0 1px 3px rgba(0,0,0,0.06);\">\n      {{ $('Extract AI Text').item.json.aiBriefing }}\n    </div>\n\n    <!-- Processing Summary -->\n    <h2 style=\"color:#1F3864;font-size:15px;border-bottom:2px solid #2E75B6;padding-bottom:6px;\">Processing Summary</h2>\n    <table style=\"border-collapse:collapse;width:100%;margin-bottom:24px;background:#fff;border-radius:4px;overflow:hidden;border:1px solid #dde3ed;\">\n      <thead>\n        <tr style=\"background:#2E75B6;color:#fff;\">\n          <th style=\"padding:9px 14px;text-align:left;font-size:12px;font-weight:600;\">Metric</th>\n          <th style=\"padding:9px 14px;text-align:right;font-size:12px;font-weight:600;\">Value</th>\n        </tr>\n      </thead>\n      <tbody>\n        <tr style=\"background:#fff;\"><td style=\"padding:8px 14px;border:1px solid #eaeff6;font-size:12px;\">Records Processed</td><td style=\"padding:8px 14px;border:1px solid #eaeff6;font-size:13px;text-align:right;font-weight:bold;color:#1F3864;\">{{ $('Extract AI Text').item.json.total_rows_clean }}</td></tr>\n        <tr style=\"background:#EBF3FB;\"><td style=\"padding:8px 14px;border:1px solid #eaeff6;font-size:12px;\">Records Removed</td><td style=\"padding:8px 14px;border:1px solid #eaeff6;font-size:12px;text-align:right;\">{{ $('Extract AI Text').item.json.rows_removed }}</td></tr>\n        <tr style=\"background:#fff;\"><td style=\"padding:8px 14px;border:1px solid #eaeff6;font-size:12px;\">MiFID Expired</td><td style=\"padding:8px 14px;border:1px solid #eaeff6;font-size:13px;text-align:right;font-weight:bold;color:#C00000;\">{{ $('Extract AI Text').item.json.expired_mifid_count }}</td></tr>\n        <tr style=\"background:#EBF3FB;\"><td style=\"padding:8px 14px;border:1px solid #eaeff6;font-size:12px;\">Clients Flagged</td><td style=\"padding:8px 14px;border:1px solid #eaeff6;font-size:13px;text-align:right;font-weight:bold;color:#856404;\">{{ $('Extract AI Text').item.json.flagged_clients_count }}</td></tr>\n        <tr style=\"background:#fff;\"><td style=\"padding:8px 14px;border:1px solid #eaeff6;font-size:12px;\">Top Analyst</td><td style=\"padding:8px 14px;border:1px solid #eaeff6;font-size:12px;text-align:right;\">{{ $('Extract AI Text').item.json.top_analyst_name }}</td></tr>\n        <tr style=\"background:#EBF3FB;\"><td style=\"padding:8px 14px;border:1px solid #eaeff6;font-size:12px;\">Processing Date</td><td style=\"padding:8px 14px;border:1px solid #eaeff6;font-size:12px;text-align:right;\">{{ $('Extract AI Text').item.json.processing_date }}</td></tr>\n      </tbody>\n    </table>\n\n    <!-- Excel attachment -->\n    <h2 style=\"color:#1F3864;font-size:15px;border-bottom:2px solid #2E75B6;padding-bottom:6px;\">Excel Report — Attached</h2>\n    <div style=\"background:#EBF3FB;border:1px solid #2E75B6;border-radius:4px;padding:14px 18px;margin-bottom:20px;\">\n      <p style=\"margin:0 0 8px;font-size:13px;font-weight:bold;\">{{ $('Extract AI Text').item.json.formattedFileName }}</p>\n      <ul style=\"font-size:12px;line-height:1.9;margin:8px 0 0;padding-left:20px;\">\n        <li><strong>Dashboard</strong> — KPI cards, 5 charts, interactive filters, risk watchlists</li>\n        <li><strong>Data</strong> — Full cleaned dataset with conditional highlighting</li>\n        <li><strong>Analyst_Summary</strong> — Performance pivot with efficiency grades</li>\n        <li><strong>Flagged_Clients</strong> — Clients requiring senior review</li>\n        <li><strong>Efficiency_Analysis</strong> — Full ROI ranking: Revenue vs Engagement</li>\n      </ul>\n    </div>\n  </div>\n\n  <!-- Footer -->\n  <div style=\"background:#1F3864;padding:14px 32px;text-align:center;\">\n    <p style=\"margin:0;color:#a8c6e8;font-size:11px;\">Generated automatically by Nomura CAMS Analytics Pipeline &mdash; Do not reply directly</p>\n    <p style=\"margin:4px 0 0;color:#6a9cc9;font-size:10px;\">&copy; Nomura Securities International. For authorised recipients only.</p>\n  </div>\n\n</body>\n</html>",
+        "attachments": "data",
+        "options": {
+          "markAsRead": true
+        }
+      },
+      "id": "c8f7b18a-8feb-4615-9d57-24ed9ee3ab42",
+      "name": "Send Success Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [
+        416,
+        1632
+      ],
+      "webhookId": "c253af28-e8c6-465a-afb4-5330861cf79e",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "BIBz8i0SXS10Ob1E",
+          "name": "Gmail account 2"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Run Preprocessing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Preprocessing": {
+      "main": [
+        [
+          {
+            "node": "Check For Errors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check For Errors": {
+      "main": [
+        [
+          {
+            "node": "Send Error Email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Run Formatting",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Formatting": {
+      "main": [
+        [
+          {
+            "node": "Build AI Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build AI Request": {
+      "main": [
+        [
+          {
+            "node": "Generate AI Briefing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate AI Briefing": {
+      "main": [
+        [
+          {
+            "node": "Extract AI Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract AI Text": {
+      "main": [
+        [
+          {
+            "node": "Read Formatted File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Formatted File": {
+      "main": [
+        [
+          {
+            "node": "Send Success Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

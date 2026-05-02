@@ -1,0 +1,229 @@
+{
+  "name": "Nomura FI Client Engagement Pipeline",
+  "active": false,
+  "versionId": "a3f1e2d4-7b8c-4e5f-9a0b-c1d2e3f4a5b6",
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "nodes": [
+    {
+      "id": "11111111-aaaa-bbbb-cccc-000000000001",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1,
+      "position": [100, 300],
+      "parameters": {
+        "pollTimes": {
+          "item": [{ "mode": "everyMinute" }]
+        },
+        "filters": {
+          "q": "subject:\"CRM Export\" has:attachment"
+        },
+        "options": {
+          "simplifyOutput": false
+        }
+      },
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "gmail-oauth-credentials-id",
+          "name": "Gmail OAuth2"
+        }
+      }
+    },
+    {
+      "id": "22222222-aaaa-bbbb-cccc-000000000002",
+      "name": "Get Full Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [340, 300],
+      "parameters": {
+        "operation": "getAll",
+        "returnAll": false,
+        "limit": 1,
+        "filters": {
+          "q": "subject:\"CRM Export\" has:attachment newer_than:1h"
+        },
+        "options": {
+          "downloadAttachments": true,
+          "dataPropertyAttachmentsPrefixName": "attachment_"
+        }
+      },
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "gmail-oauth-credentials-id",
+          "name": "Gmail OAuth2"
+        }
+      }
+    },
+    {
+      "id": "33333333-aaaa-bbbb-cccc-000000000003",
+      "name": "Run Preprocessing",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [580, 300],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const { spawnSync } = require('child_process');\n\nconst binary = item.binary || {};\nconst allKeys = Object.keys(binary);\nconst attachmentKey = allKeys.find(k => {\n  const b = binary[k];\n  const mime = (b.mimeType || '').toLowerCase();\n  const name = (b.fileName || '').toLowerCase();\n  return mime.includes('spreadsheet') || mime.includes('excel') ||\n         mime.includes('openxmlformats') || name.endsWith('.xlsx');\n}) || allKeys.find(k => k.startsWith('attachment_')) || allKeys[0];\n\nif (!attachmentKey) throw new Error('No attachment found. Keys: ' + allKeys.join(', '));\n\nconst fileUuid = binary[attachmentKey].data;\nconst binaryStorageRoot = '/Users/priyanshupatel/nomura_tmp/n8n_binary';\n\nconst findResult = spawnSync('find', [binaryStorageRoot, '-name', fileUuid, '-type', 'f'], { encoding: 'utf8' });\nconst rawFilePath = (findResult.stdout || '').trim().split('\\n')[0];\n\nif (!rawFilePath) throw new Error(`Binary file UUID \"${fileUuid}\" not found under ${binaryStorageRoot}`);\n\nconst result = spawnSync(\n  '/Users/priyanshupatel/Documents/GitHub/personal/venv/bin/python3',\n  ['/Users/priyanshupatel/Documents/GitHub/personal/src/preprocessing.py', rawFilePath],\n  { encoding: 'utf8', timeout: 120000 }\n);\n\nif (result.error) throw new Error('Python spawn error: ' + result.error.message);\nif (result.status !== 0) throw new Error('Preprocessing failed:\\n' + result.stderr);\n\nconst stdout = (result.stdout || '').trim();\nlet parsed;\ntry { parsed = JSON.parse(stdout); }\ncatch(e) { throw new Error('Could not parse preprocessing output:\\n' + stdout); }\n\nif (parsed.error) throw new Error('Preprocessing error: ' + parsed.error);\n\nconst triggerJson = $('Gmail Trigger').item.json;\nreturn {\n  json: {\n    ...parsed,\n    senderEmail: triggerJson.from?.value?.[0]?.address || triggerJson.from || '',\n    originalSubject: triggerJson.subject || 'CRM Export',\n  }\n};"
+      }
+    },
+    {
+      "id": "55555555-aaaa-bbbb-cccc-000000000005",
+      "name": "Check For Errors",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [820, 300],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.error_flag }}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "66666666-aaaa-bbbb-cccc-000000000006",
+      "name": "Send Error Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [1060, 150],
+      "parameters": {
+        "operation": "send",
+        "toList": "={{ $json.senderEmail }}",
+        "subject": "=RE: {{ $json.originalSubject }} — Processing Error",
+        "message": "=<html><body style=\"font-family:Arial,sans-serif;color:#333;\">\n<div style=\"background:#C00000;padding:20px;color:#fff;\"><h2 style=\"margin:0;\">Nomura CAMS — CRM Processing Error</h2></div>\n<div style=\"padding:20px;\"><p>Your CRM export could not be processed.</p>\n<table style=\"border-collapse:collapse;width:100%;\">\n<tr><td style=\"padding:8px;border:1px solid #ddd;font-weight:bold;\">Error</td><td style=\"padding:8px;border:1px solid #ddd;\">{{ $json.error || 'Data quality issues' }}</td></tr>\n<tr><td style=\"padding:8px;border:1px solid #ddd;font-weight:bold;\">Null Values</td><td style=\"padding:8px;border:1px solid #ddd;\">{{ $json.null_count }}</td></tr>\n<tr><td style=\"padding:8px;border:1px solid #ddd;font-weight:bold;\">Duplicates</td><td style=\"padding:8px;border:1px solid #ddd;\">{{ $json.duplicate_count }}</td></tr>\n</table>\n<p>Please correct the source data and resubmit.</p>\n<p>Regards,<br><strong>Nomura CAMS Pipeline</strong></p>\n</div></body></html>",
+        "options": {}
+      },
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "gmail-oauth-credentials-id",
+          "name": "Gmail OAuth2"
+        }
+      }
+    },
+    {
+      "id": "77777777-aaaa-bbbb-cccc-000000000007",
+      "name": "Run Formatting",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1060, 300],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const { spawnSync } = require('child_process');\n\nconst cleanFilePath = item.json.clean_file_path;\nif (!cleanFilePath) throw new Error('clean_file_path missing from preprocessing output');\n\nconst meta = JSON.stringify({\n  total_rows_clean: item.json.total_rows_clean,\n  processing_date:  item.json.processing_date,\n  timestamp:        item.json.timestamp,\n});\n\nconst result = spawnSync(\n  '/Users/priyanshupatel/Documents/GitHub/personal/venv/bin/python3',\n  ['/Users/priyanshupatel/Documents/GitHub/personal/src/formatting.py', cleanFilePath, meta],\n  { encoding: 'utf8', timeout: 180000 }\n);\n\nif (result.error) throw new Error('Python spawn error: ' + result.error.message);\nif (result.status !== 0) throw new Error('Formatting failed:\\n' + result.stderr);\n\nconst stdout = (result.stdout || '').trim();\nlet parsed;\ntry { parsed = JSON.parse(stdout); }\ncatch(e) { throw new Error('Could not parse formatting output:\\n' + stdout); }\n\nif (!parsed.success) throw new Error('Formatting error: ' + (parsed.error || 'Unknown'));\n\nreturn {\n  json: {\n    ...item.json,\n    formattedFilePath: parsed.formatted_file_path,\n    formattedFileName: parsed.formatted_file_path.split('/').pop(),\n    formattingSuccess: parsed.success,\n  }\n};"
+      }
+    },
+    {
+      "id": "99999999-aaaa-bbbb-cccc-000000000009",
+      "name": "Generate AI Briefing",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1300, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"generationConfig\": { \"temperature\": 0.3, \"maxOutputTokens\": 2500 },\n  \"contents\": [{\n    \"role\": \"user\",\n    \"parts\": [{\n      \"text\": \"You are a senior Fixed Income analyst at Nomura Securities. Produce a professional HTML briefing note for the Head of Fixed Income Client Management. Use formal financial language. Be specific and data-driven. Return ONLY valid HTML with inline styles — no markdown, no code fences, no <html> or <body> tags.\\n\\nGenerate a briefing based on this CRM data:\\nDate: {{ $json.processing_date }}\\nTotal Clients: {{ $json.total_rows_clean }}\\nRecords Removed: {{ $json.rows_removed }}\\nMiFID Expired: {{ $json.expired_mifid_count }}\\nFlagged for Review: {{ $json.flagged_clients_count }}\\nNull Values: {{ $json.null_count }}\\nTop Analyst: {{ $json.top_analyst_name }} (Revenue: ${{ $json.top_analyst_revenue }})\\nLowest Efficiency Analyst: {{ $json.worst_analyst_name }} (Rev/Meeting: ${{ $json.worst_analyst_rpm }})\\nTop 3 Clients by Revenue: {{ JSON.stringify($json.top_3_clients) }}\\nBottom 3 by Rev/Meeting: {{ JSON.stringify($json.bottom_3_rpm_clients) }}\\nRegional Revenue: {{ JSON.stringify($json.region_summary) }}\\nTier Summary: {{ JSON.stringify($json.tier_summary) }}\\nFlagged Clients (High Meetings Low Revenue): {{ JSON.stringify($json.flagged_clients_list) }}\\nMiFID Expired: {{ JSON.stringify($json.expired_mifid_list) }}\\n\\nStructure with exactly these sections using styled <h3> headers:\\n1. Executive Summary\\n2. Analyst Performance\\n3. Client Risk Flags (focus on high meetings / low revenue clients)\\n4. MiFID Compliance Actions\\n5. Regional & Tier Insights\\n6. Recommended Actions (bullet list, max 6)\\n\\nUse <table>, <ul>, <strong> with inline styles. Colors: navy #1F3864, blue #2E75B6, red #C00000, amber #856404.\"\n    }]\n  }]\n}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": false,
+              "neverError": false
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "gemini-api-credentials-id",
+          "name": "Gemini API Key"
+        }
+      }
+    },
+    {
+      "id": "aaaaaaaa-bbbb-cccc-dddd-000000000010",
+      "name": "Extract AI Text",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, 300],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Pull metadata from upstream nodes\nconst preproc    = $('Run Preprocessing').item.json;\nconst formatting = $('Run Formatting').item.json;\n\n// Extract and clean Gemini response text\nlet aiBriefing = '<p style=\"color:#888;font-style:italic;\">AI briefing unavailable.</p>';\ntry {\n  const raw = $json.candidates[0].content.parts[0].text || '';\n  aiBriefing = raw\n    .replace(/```html\\n?/gi, '')\n    .replace(/```\\n?/gi, '')\n    .trim();\n  // If plain text returned, wrap lines in <p> tags\n  if (!aiBriefing.includes('<')) {\n    aiBriefing = aiBriefing\n      .split('\\n')\n      .filter(l => l.trim())\n      .map(l => `<p style=\"margin:6px 0;\">${l}</p>`)\n      .join('');\n  }\n} catch(e) { /* keep default */ }\n\n// Pass everything forward — no file I/O here\nreturn {\n  json: {\n    senderEmail:           preproc.senderEmail,\n    originalSubject:       preproc.originalSubject,\n    processing_date:       preproc.processing_date,\n    total_rows_clean:      preproc.total_rows_clean,\n    rows_removed:          preproc.rows_removed,\n    expired_mifid_count:   preproc.expired_mifid_count,\n    flagged_clients_count: preproc.flagged_clients_count,\n    top_analyst_name:      preproc.top_analyst_name,\n    null_count:            preproc.null_count,\n    duplicate_count:       preproc.duplicate_count,\n    aiBriefing:            aiBriefing,\n    formattedFilePath:     formatting.formattedFilePath,\n    formattedFileName:     formatting.formattedFileName,\n  }\n};"
+      }
+    },
+    {
+      "id": "bbbbbbbb-cccc-dddd-eeee-000000000011",
+      "name": "Read Formatted File",
+      "type": "n8n-nodes-base.readBinaryFile",
+      "typeVersion": 1,
+      "position": [1780, 300],
+      "parameters": {
+        "filePath": "={{ $json.formattedFilePath }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "cccccccc-dddd-eeee-ffff-000000000012",
+      "name": "Send Success Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [2020, 300],
+      "parameters": {
+        "operation": "send",
+        "toList": "={{ $('Extract AI Text').item.json.senderEmail }}",
+        "subject": "=RE: {{ $('Extract AI Text').item.json.originalSubject }} — Clean Report Ready",
+        "message": "=<html>\n<body style=\"font-family:Arial,sans-serif;color:#333;margin:0;padding:0;background:#f4f4f4;\">\n\n  <!-- Header -->\n  <div style=\"background:#1F3864;padding:24px 32px;color:#fff;\">\n    <table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\"><tr>\n      <td><h1 style=\"margin:0;font-size:22px;letter-spacing:1px;\">NOMURA</h1><p style=\"margin:4px 0 0;font-size:13px;color:#a8c6e8;\">Fixed Income Client Engagement Report</p></td>\n      <td style=\"text-align:right;\"><p style=\"margin:0;font-size:12px;color:#a8c6e8;\">{{ $('Extract AI Text').item.json.processing_date }}</p><p style=\"margin:4px 0 0;font-size:11px;color:#a8c6e8;\">AUTOMATED PIPELINE REPORT</p></td>\n    </tr></table>\n  </div>\n\n  <div style=\"padding:24px 32px;\">\n\n    <!-- Processing Summary -->\n    <h2 style=\"color:#1F3864;font-size:15px;border-bottom:2px solid #2E75B6;padding-bottom:6px;\">Processing Summary</h2>\n    <table style=\"border-collapse:collapse;width:100%;margin-bottom:20px;\">\n      <thead><tr style=\"background:#2E75B6;color:#fff;\">\n        <th style=\"padding:8px 12px;text-align:left;font-size:12px;\">Metric</th>\n        <th style=\"padding:8px 12px;text-align:right;font-size:12px;\">Value</th>\n      </tr></thead>\n      <tbody>\n        <tr style=\"background:#fff;\"><td style=\"padding:7px 12px;border:1px solid #dde3ed;font-size:12px;\">Records Processed</td><td style=\"padding:7px 12px;border:1px solid #dde3ed;font-size:12px;text-align:right;font-weight:bold;\">{{ $('Extract AI Text').item.json.total_rows_clean }}</td></tr>\n        <tr style=\"background:#EBF3FB;\"><td style=\"padding:7px 12px;border:1px solid #dde3ed;font-size:12px;\">Records Removed</td><td style=\"padding:7px 12px;border:1px solid #dde3ed;font-size:12px;text-align:right;\">{{ $('Extract AI Text').item.json.rows_removed }}</td></tr>\n        <tr style=\"background:#fff;\"><td style=\"padding:7px 12px;border:1px solid #dde3ed;font-size:12px;\">MiFID Expired Clients</td><td style=\"padding:7px 12px;border:1px solid #dde3ed;font-size:12px;text-align:right;color:#C00000;font-weight:bold;\">{{ $('Extract AI Text').item.json.expired_mifid_count }}</td></tr>\n        <tr style=\"background:#EBF3FB;\"><td style=\"padding:7px 12px;border:1px solid #dde3ed;font-size:12px;\">Clients Flagged for Review</td><td style=\"padding:7px 12px;border:1px solid #dde3ed;font-size:12px;text-align:right;color:#856404;font-weight:bold;\">{{ $('Extract AI Text').item.json.flagged_clients_count }}</td></tr>\n        <tr style=\"background:#fff;\"><td style=\"padding:7px 12px;border:1px solid #dde3ed;font-size:12px;\">Top Analyst by Revenue</td><td style=\"padding:7px 12px;border:1px solid #dde3ed;font-size:12px;text-align:right;\">{{ $('Extract AI Text').item.json.top_analyst_name }}</td></tr>\n        <tr style=\"background:#EBF3FB;\"><td style=\"padding:7px 12px;border:1px solid #dde3ed;font-size:12px;\">Processing Date</td><td style=\"padding:7px 12px;border:1px solid #dde3ed;font-size:12px;text-align:right;\">{{ $('Extract AI Text').item.json.processing_date }}</td></tr>\n      </tbody>\n    </table>\n\n    <!-- AI Briefing -->\n    <h2 style=\"color:#1F3864;font-size:15px;border-bottom:2px solid #2E75B6;padding-bottom:6px;\">AI-Generated Analyst Briefing</h2>\n    <div style=\"background:#fff;border-left:4px solid #2E75B6;padding:16px 20px;margin-bottom:20px;font-size:13px;line-height:1.7;\">\n      {{ $('Extract AI Text').item.json.aiBriefing }}\n    </div>\n\n    <!-- Attachment Info -->\n    <h2 style=\"color:#1F3864;font-size:15px;border-bottom:2px solid #2E75B6;padding-bottom:6px;\">Excel Report — Attached</h2>\n    <div style=\"background:#EBF3FB;border:1px solid #2E75B6;border-radius:4px;padding:14px 18px;margin-bottom:20px;\">\n      <p style=\"margin:0 0 8px;font-size:13px;\"><strong>{{ $('Extract AI Text').item.json.formattedFileName }}</strong></p>\n      <ul style=\"font-size:12px;line-height:1.9;margin:8px 0 0;padding-left:20px;\">\n        <li><strong>Dashboard</strong> — KPI cards, 5 charts, risk watchlists (opens first)</li>\n        <li><strong>Data</strong> — Full cleaned dataset with conditional row highlighting</li>\n        <li><strong>Analyst_Summary</strong> — Performance pivot with A/B/C/D efficiency grades</li>\n        <li><strong>Flagged_Clients</strong> — Clients requiring senior management review</li>\n        <li><strong>Efficiency_Analysis</strong> — Full ROI ranking: Revenue vs Engagement effort</li>\n      </ul>\n    </div>\n\n  </div>\n\n  <!-- Footer -->\n  <div style=\"background:#1F3864;padding:14px 32px;text-align:center;\">\n    <p style=\"margin:0;color:#a8c6e8;font-size:11px;\">Generated automatically by Nomura CAMS Analytics Pipeline &mdash; Do not reply directly</p>\n    <p style=\"margin:4px 0 0;color:#a8c6e8;font-size:10px;\">&copy; Nomura Securities International. For authorised recipients only.</p>\n  </div>\n\n</body>\n</html>",
+        "attachments": "data",
+        "options": {}
+      },
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "gmail-oauth-credentials-id",
+          "name": "Gmail OAuth2"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Gmail Trigger": {
+      "main": [[{ "node": "Get Full Email",       "type": "main", "index": 0 }]]
+    },
+    "Get Full Email": {
+      "main": [[{ "node": "Run Preprocessing",     "type": "main", "index": 0 }]]
+    },
+    "Run Preprocessing": {
+      "main": [[{ "node": "Check For Errors",      "type": "main", "index": 0 }]]
+    },
+    "Check For Errors": {
+      "main": [
+        [{ "node": "Send Error Email",             "type": "main", "index": 0 }],
+        [{ "node": "Run Formatting",               "type": "main", "index": 0 }]
+      ]
+    },
+    "Run Formatting": {
+      "main": [[{ "node": "Generate AI Briefing",  "type": "main", "index": 0 }]]
+    },
+    "Generate AI Briefing": {
+      "main": [[{ "node": "Extract AI Text",        "type": "main", "index": 0 }]]
+    },
+    "Extract AI Text": {
+      "main": [[{ "node": "Read Formatted File",   "type": "main", "index": 0 }]]
+    },
+    "Read Formatted File": {
+      "main": [[{ "node": "Send Success Email",    "type": "main", "index": 0 }]]
+    }
+  }
+}
